@@ -1,7 +1,7 @@
 import io
 import os
 import gc
-import urllib.request
+import requests
 import numpy as np
 from PIL import Image, ImageFilter
 import onnxruntime as ort
@@ -13,14 +13,20 @@ app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024
 MODEL_PATH = "silueta.onnx"
 MODEL_URL = "https://github.com/danielgatis/rembg/releases/download/v0.0.0/silueta.onnx"
 
-# সার্ভার চালুর সময় একবারই ডাউনলোড হবে
-if not os.path.exists(MODEL_PATH):
-    print("Downloading Silueta model...")
-    urllib.request.urlretrieve(MODEL_URL, MODEL_PATH)
+# নিরাপদ স্ট্রিম ডাউনলোডার (GitHub কখনোই ব্লক করবে না)
+if not os.path.exists(MODEL_PATH) or os.path.getsize(MODEL_PATH) < 1000000:
+    print("Downloading high-precision Silueta model...")
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+    response = requests.get(MODEL_URL, headers=headers, stream=True, timeout=120)
+    with open(MODEL_PATH, "wb") as f:
+        for chunk in response.iter_content(chunk_size=65536):
+            if chunk:
+                f.write(chunk)
+    print("Download complete! Model size:", os.path.getsize(MODEL_PATH))
 
-# মাল্টি-থ্রেডেড ফাস্ট সিপিইউ সেশন (মডেল সারাজীবন মেমরিতে রেডি থাকবে)
+# মেমোরি সেভার ও ফাস্ট সেশন
 opts = ort.SessionOptions()
-opts.intra_op_num_threads = 2
+opts.intra_op_num_threads = 1
 opts.inter_op_num_threads = 1
 opts.enable_cpu_mem_arena = False
 opts.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
@@ -78,14 +84,14 @@ def remove_background():
         pred = (pred - mi) / (ma - mi + 1e-8)
         pred = np.squeeze(pred)
 
-        # জিরো-হোয়াইট থ্রেশহোল্ড
+        # জিরো-হোয়াইট থ্রেশহোল্ড
         pred_clean = np.where(pred < 0.35, 0.0, pred)
         alpha = np.clip((pred_clean - 0.35) / (0.75 - 0.35), 0.0, 1.0) * 255.0
         
         mask_pil = Image.fromarray(alpha.astype(np.uint8), mode="L")
         mask_pil = mask_pil.resize((orig_w, orig_h), Image.Resampling.BILINEAR)
 
-        # বর্ডার চোক (সাদা অংশ সম্পূর্ণ দূর করা)
+        # বর্ডার চোক (সাদা অংশ সম্পূর্ণ কেটে ফেলা)
         mask_eroded = mask_pil.filter(ImageFilter.MinFilter(3))
         mask_final = mask_eroded.filter(ImageFilter.GaussianBlur(radius=0.7))
 
