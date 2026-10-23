@@ -10,18 +10,17 @@ from flask import Flask, request, send_file, jsonify
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024
 
-# ১০ গুণ বেশি নিখুঁত সিলুয়েট মডেল (সাইজ ৪৩ MB)
 MODEL_PATH = "silueta.onnx"
 MODEL_URL = "https://github.com/danielgatis/rembg/releases/download/v0.0.0/silueta.onnx"
 
+# সার্ভার চালুর সময় একবারই ডাউনলোড হবে
 if not os.path.exists(MODEL_PATH):
-    print("Downloading high-precision Silueta model...")
+    print("Downloading Silueta model...")
     urllib.request.urlretrieve(MODEL_URL, MODEL_PATH)
-    print("Download complete!")
 
-# ৫১২ MB র‍্যাম অপ্টিমাইজড সেশন
+# মাল্টি-থ্রেডেড ফাস্ট সিপিইউ সেশন (মডেল সারাজীবন মেমরিতে রেডি থাকবে)
 opts = ort.SessionOptions()
-opts.intra_op_num_threads = 1
+opts.intra_op_num_threads = 2
 opts.inter_op_num_threads = 1
 opts.enable_cpu_mem_arena = False
 opts.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
@@ -35,7 +34,7 @@ def keep_alive():
 
 @app.route("/", methods=["GET"])
 def health_check():
-    return jsonify({"status": "running", "service": "Zero-Halo Clean BG Remover"}), 200
+    return jsonify({"status": "running"}), 200
 
 @app.route("/removebg", methods=["POST"])
 def remove_background():
@@ -53,15 +52,15 @@ def remove_background():
         original_img = Image.open(io.BytesIO(img_bytes)).convert("RGBA")
         orig_w, orig_h = original_img.size
 
-        # হাই-কোয়ালিটি রি-স্কেলিং
-        if orig_w > 1200 or orig_h > 1200:
-            original_img.thumbnail((1200, 1200), Image.Resampling.LANCZOS)
+        # দ্রুত প্রসেসিংয়ের জন্য সাইজ নিয়ন্ত্রণ
+        if orig_w > 900 or orig_h > 900:
+            original_img.thumbnail((900, 900), Image.Resampling.BILINEAR)
             orig_w, orig_h = original_img.size
 
         rgb_img = original_img.convert("RGB")
         resized = rgb_img.resize((320, 320), Image.Resampling.BILINEAR)
 
-        # ইমেজনেট স্ট্যান্ডার্ড নরমালাইজেশন
+        # নরমালাইজেশন
         arr = np.array(resized, dtype=np.float32) / 255.0
         mean = np.array([0.485, 0.456, 0.406], dtype=np.float32)
         std = np.array([0.229, 0.224, 0.225], dtype=np.float32)
@@ -74,29 +73,25 @@ def remove_background():
         ort_outs = session.run(None, {input_name: tensor})
         pred = ort_outs[0][:, 0, :, :]
 
-        # মিন-ম্যাক্স স্কেলিং
         ma = np.max(pred)
         mi = np.min(pred)
         pred = (pred - mi) / (ma - mi + 1e-8)
         pred = np.squeeze(pred)
 
-        # ১. কড়া থ্রেশহোল্ড (যাতে কোনো ব্যাকগ্রাউন্ড বা সাদা রঙ না থাকে)
+        # জিরো-হোয়াইট থ্রেশহোল্ড
         pred_clean = np.where(pred < 0.35, 0.0, pred)
         alpha = np.clip((pred_clean - 0.35) / (0.75 - 0.35), 0.0, 1.0) * 255.0
         
         mask_pil = Image.fromarray(alpha.astype(np.uint8), mode="L")
         mask_pil = mask_pil.resize((orig_w, orig_h), Image.Resampling.BILINEAR)
 
-        # ২. ফটোশপ চোক (Photoshop Choke): মাস্ক ভেতর দিকে ৩ পিক্সেল কেটে ফেলা হচ্ছে
-        # এর ফলে চারপাশের ১ ফোঁটা সাদা বর্ডারও থাকতে পারবে না!
-        choke_val = 3
-        mask_eroded = mask_pil.filter(ImageFilter.MinFilter(choke_val))
-
-        # ৩. এজ মসৃণ করা
+        # বর্ডার চোক (সাদা অংশ সম্পূর্ণ দূর করা)
+        mask_eroded = mask_pil.filter(ImageFilter.MinFilter(3))
         mask_final = mask_eroded.filter(ImageFilter.GaussianBlur(radius=0.7))
 
         original_img.putalpha(mask_final)
 
+        # ফাস্ট কম্প্রেশন
         output_io = io.BytesIO()
         original_img.save(output_io, format="PNG", compress_level=1)
         output_io.seek(0)
