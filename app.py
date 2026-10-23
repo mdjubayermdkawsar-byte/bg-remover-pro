@@ -14,17 +14,15 @@ MODEL_PATH = "u2netp.onnx"
 MODEL_URL = "https://github.com/danielgatis/rembg/releases/download/v0.0.0/u2netp.onnx"
 
 if not os.path.exists(MODEL_PATH):
-    print("Downloading U2Netp model...")
     response = requests.get(MODEL_URL)
     with open(MODEL_PATH, "wb") as f:
         f.write(response.content)
 
-# আল্ট্রা-মেমোরি সেভার সেটিংস (র‍্যাম ক্র্যাশ ঠেকাবে)
+# আল্ট্রা-ফাস্ট ও মেমোরি সেভার সেটিংস
 opts = ort.SessionOptions()
 opts.intra_op_num_threads = 1
 opts.inter_op_num_threads = 1
-opts.enable_cpu_mem_arena = False  # মেমোরি ধরে রাখা বন্ধ করবে
-opts.enable_mem_pattern = False
+opts.enable_cpu_mem_arena = False
 opts.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
 
 session = ort.InferenceSession(MODEL_PATH, sess_options=opts, providers=['CPUExecutionProvider'])
@@ -32,11 +30,11 @@ input_name = session.get_inputs()[0].name
 
 @app.route("/keep-alive", methods=["GET"])
 def keep_alive():
-    return "I am awake!", 200
+    return "OK", 200
 
 @app.route("/", methods=["GET"])
 def health_check():
-    return jsonify({"status": "running", "service": "U2Netp Render AI BG Remover"}), 200
+    return jsonify({"status": "running"}), 200
 
 @app.route("/removebg", methods=["POST"])
 def remove_background():
@@ -48,19 +46,19 @@ def remove_background():
         img_bytes = request.data
 
     if not img_bytes:
-        return jsonify({"error": "No image data found"}), 400
+        return jsonify({"error": "No image"}), 400
 
     try:
         original_img = Image.open(io.BytesIO(img_bytes)).convert("RGBA")
         orig_w, orig_h = original_img.size
 
-        # মেমোরি লিমিট
-        if orig_w > 1200 or orig_h > 1200:
-            original_img.thumbnail((1200, 1200), Image.Resampling.LANCZOS)
+        # দ্রুত প্রসেসিংয়ের জন্য সাইজ নিয়ন্ত্রণ
+        if orig_w > 1024 or orig_h > 1024:
+            original_img.thumbnail((1024, 1024), Image.Resampling.BILINEAR)
             orig_w, orig_h = original_img.size
 
         rgb_img = original_img.convert("RGB")
-        resized = rgb_img.resize((320, 320), Image.Resampling.BILINEAR)
+        resized = rgb_img.resize((320, 320), Image.Resampling.NEAREST)
 
         arr = np.array(resized, dtype=np.float32) / 255.0
         mean = np.array([0.485, 0.456, 0.406], dtype=np.float32)
@@ -70,6 +68,7 @@ def remove_background():
         tensor = np.transpose(norm, (2, 0, 1))
         tensor = np.expand_dims(tensor, axis=0).astype(np.float32)
 
+        # এআই ইনফারেন্স
         ort_outs = session.run(None, {input_name: tensor})
         pred = ort_outs[0][:, 0, :, :]
 
@@ -84,11 +83,11 @@ def remove_background():
 
         original_img.putalpha(mask_pil)
 
+        # সুপারফাস্ট পিএনজি সেভ (optimize=True বন্ধ করা হয়েছে স্পিডের জন্য)
         output_io = io.BytesIO()
-        original_img.save(output_io, format="PNG", optimize=True)
+        original_img.save(output_io, format="PNG", compress_level=1)
         output_io.seek(0)
 
-        # ফোর্স মেমোরি ক্লিনআপ
         del tensor, ort_outs, pred, original_img, rgb_img, mask_pil
         gc.collect()
 
