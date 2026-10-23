@@ -1,0 +1,7 @@
+Flask
+flask-cors
+Pillow
+numpy<2.0.0
+onnxruntime
+requests
+gunicorn
