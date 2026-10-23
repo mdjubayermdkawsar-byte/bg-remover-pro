@@ -1,7 +1,7 @@
 import io
 import os
 import gc
-import requests
+import urllib.request
 import numpy as np
 from PIL import Image, ImageFilter
 import onnxruntime as ort
@@ -10,21 +10,15 @@ from flask import Flask, request, send_file, jsonify
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024
 
-# সুপারফাস্ট ৪.৫ MB মডেল (১.৫ সেকেন্ডে প্রসেস করবে)
+# সুপারফাস্ট ৪.৫ MB মডেল (১.৫ সেকেন্ডে রান হবে)
 MODEL_PATH = "u2netp.onnx"
 MODEL_URL = "https://github.com/danielgatis/rembg/releases/download/v0.0.0/u2netp.onnx"
 
 if not os.path.exists(MODEL_PATH) or os.path.getsize(MODEL_PATH) < 1000000:
     print("Downloading fast U2Netp model...")
-    headers = {"User-Agent": "Mozilla/5.0"}
-    r = requests.get(MODEL_URL, headers=headers, stream=True, timeout=60)
-    with open(MODEL_PATH, "wb") as f:
-        for chunk in r.iter_content(chunk_size=65536):
-            if chunk:
-                f.write(chunk)
+    urllib.request.urlretrieve(MODEL_URL, MODEL_PATH)
     print("Download complete!")
 
-# আল্ট্রা-ফাস্ট লাইটওয়েট সেটিংস
 opts = ort.SessionOptions()
 opts.intra_op_num_threads = 1
 opts.inter_op_num_threads = 1
@@ -58,7 +52,7 @@ def remove_background():
         original_img = Image.open(io.BytesIO(img_bytes)).convert("RGBA")
         orig_w, orig_h = original_img.size
 
-        # দ্রুত প্রসেসিংয়ের জন্য সাইজ নিয়ন্ত্রণ (ম্যাক্সিমাম ৮০০ পিক্সেল)
+        # দ্রুত প্রসেসিংয়ের জন্য অপ্টিমাইজড সাইজ
         if orig_w > 800 or orig_h > 800:
             original_img.thumbnail((800, 800), Image.Resampling.BILINEAR)
             orig_w, orig_h = original_img.size
@@ -66,7 +60,7 @@ def remove_background():
         rgb_img = original_img.convert("RGB")
         resized = rgb_img.resize((320, 320), Image.Resampling.BILINEAR)
 
-        # ইমেজনেট স্ট্যান্ডার্ড নরমালাইজেশন
+        # ইমেজনেট নরমালাইজেশন
         arr = np.array(resized, dtype=np.float32) / 255.0
         mean = np.array([0.485, 0.456, 0.406], dtype=np.float32)
         std = np.array([0.229, 0.224, 0.225], dtype=np.float32)
@@ -75,7 +69,7 @@ def remove_background():
         tensor = np.transpose(norm, (2, 0, 1))
         tensor = np.expand_dims(tensor, axis=0).astype(np.float32)
 
-        # ইনফারেন্স রান (সুপারফাস্ট)
+        # এআই ইনফারেন্স (মাত্র ১.৫ সেকেন্ড)
         ort_outs = session.run(None, {input_name: tensor})
         pred = ort_outs[0][:, 0, :, :]
 
@@ -84,20 +78,20 @@ def remove_background():
         pred = (pred - mi) / (ma - mi + 1e-8)
         pred = np.squeeze(pred)
 
-        # কড়া ব্যাকগ্রাউন্ড কাটআউট (সাদা ব্যাকগ্রাউন্ড সম্পূর্ণ মুছে ফেলা)
+        # জিরো-হোয়াইট থ্রেশহোল্ড (সাদা ব্যাকগ্রাউন্ড সম্পূর্ণ ডিলিট)
         pred_clean = np.where(pred < 0.38, 0.0, pred)
         alpha = np.clip((pred_clean - 0.38) / (0.78 - 0.38), 0.0, 1.0) * 255.0
         
         mask_pil = Image.fromarray(alpha.astype(np.uint8), mode="L")
         mask_pil = mask_pil.resize((orig_w, orig_h), Image.Resampling.BILINEAR)
 
-        # ফটোশপ চোক (সাদা বর্ডার ৩ পিক্সেল ভেতর দিকে কেটে বাদ দেওয়া)
+        # ফটোশপ চোক (সাদা বর্ডার ৩ পিক্সেল ভেতর দিকে কেটে ফেলা)
         mask_eroded = mask_pil.filter(ImageFilter.MinFilter(3))
         mask_final = mask_eroded.filter(ImageFilter.GaussianBlur(radius=0.7))
 
         original_img.putalpha(mask_final)
 
-        # ফাস্ট কম্প্রেশন
+        # ফাস্ট পিএনজি সেভ
         output_io = io.BytesIO()
         original_img.save(output_io, format="PNG", compress_level=1)
         output_io.seek(0)
