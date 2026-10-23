@@ -13,22 +13,23 @@ app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024
 MODEL_PATH = "u2netp.onnx"
 MODEL_URL = "https://github.com/danielgatis/rembg/releases/download/v0.0.0/u2netp.onnx"
 
-# সার্ভার চালুর সময় মডেল না থাকলে ডাউনলোড করে নেবে (৪.৫ MB)
 if not os.path.exists(MODEL_PATH):
     print("Downloading U2Netp model...")
     response = requests.get(MODEL_URL)
     with open(MODEL_PATH, "wb") as f:
         f.write(response.content)
-    print("Download complete!")
 
-# রেন্ডারের ৫১২ MB র‍্যামের জন্য অপ্টিমাইজড
+# আল্ট্রা-মেমোরি সেভার সেটিংস (র‍্যাম ক্র্যাশ ঠেকাবে)
 opts = ort.SessionOptions()
 opts.intra_op_num_threads = 1
 opts.inter_op_num_threads = 1
+opts.enable_cpu_mem_arena = False  # মেমোরি ধরে রাখা বন্ধ করবে
+opts.enable_mem_pattern = False
+opts.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
+
 session = ort.InferenceSession(MODEL_PATH, sess_options=opts, providers=['CPUExecutionProvider'])
 input_name = session.get_inputs()[0].name
 
-# রেন্ডারকে জাগিয়ে রাখার জন্য
 @app.route("/keep-alive", methods=["GET"])
 def keep_alive():
     return "I am awake!", 200
@@ -53,8 +54,9 @@ def remove_background():
         original_img = Image.open(io.BytesIO(img_bytes)).convert("RGBA")
         orig_w, orig_h = original_img.size
 
-        if orig_w > 1500 or orig_h > 1500:
-            original_img.thumbnail((1500, 1500), Image.Resampling.LANCZOS)
+        # মেমোরি লিমিট
+        if orig_w > 1200 or orig_h > 1200:
+            original_img.thumbnail((1200, 1200), Image.Resampling.LANCZOS)
             orig_w, orig_h = original_img.size
 
         rgb_img = original_img.convert("RGB")
@@ -86,6 +88,7 @@ def remove_background():
         original_img.save(output_io, format="PNG", optimize=True)
         output_io.seek(0)
 
+        # ফোর্স মেমোরি ক্লিনআপ
         del tensor, ort_outs, pred, original_img, rgb_img, mask_pil
         gc.collect()
 
